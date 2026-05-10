@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run main2",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/Src/main2.py",
+            "cwd": "${workspaceFolder}/Src",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}
