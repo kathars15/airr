@@ -2,6 +2,39 @@ import numpy as np
 from scipy.optimize import least_squares
 from typing import List, Dict, Tuple
 
+
+def angle_diff_deg(target_angle: float, source_angle: float) -> float:
+    """计算 target - source 的最短有符号角度差。"""
+    return (target_angle - source_angle + 180.0) % 360.0 - 180.0
+
+
+def summarize_angle_offsets(measurements: List[Dict]) -> Dict:
+    """统计零位置偏移假设下的角度差，用于诊断标定数据质量。"""
+    az_diffs = []
+    pitch_diffs = []
+    for m in measurements:
+        az_diffs.append(angle_diff_deg(m['optical_az'], m['radar_az']))
+        pitch_diffs.append(m['optical_pitch'] - m['radar_pitch'])
+
+    if not az_diffs:
+        return {
+            'azimuth_offset_median': 0.0,
+            'pitch_offset_median': 0.0,
+            'azimuth_offset_mean': 0.0,
+            'pitch_offset_mean': 0.0,
+            'azimuth_offset_std': 0.0,
+            'pitch_offset_std': 0.0,
+        }
+
+    return {
+        'azimuth_offset_median': float(np.median(az_diffs)),
+        'pitch_offset_median': float(np.median(pitch_diffs)),
+        'azimuth_offset_mean': float(np.mean(az_diffs)),
+        'pitch_offset_mean': float(np.mean(pitch_diffs)),
+        'azimuth_offset_std': float(np.std(az_diffs)),
+        'pitch_offset_std': float(np.std(pitch_diffs)),
+    }
+
 def calculate_offset_from_measurements(measurements: List[Dict]) -> Tuple[np.ndarray, bool]:
     """
     根据雷达-光学配对测量值计算光学传感器相对于雷达的位置偏移
@@ -46,9 +79,9 @@ def calculate_offset_from_measurements(measurements: List[Dict]) -> Tuple[np.nda
     n_measurements = len(measurements)
     x0 = [0.0, 0.0, 0.0] + [m['radar_range'] * 0.8 for m in measurements]
     
-    # 设置参数边界 - 限制偏移量在合理范围（-50m 到 50m）
-    bounds_lower = [-50.0, -50.0, -50.0] + [1.0] * n_measurements
-    bounds_upper = [50.0, 50.0, 50.0] + [np.inf] * n_measurements
+    # 设置参数边界 - 限制偏移量在合理范围（-3000m 到 3000m）
+    bounds_lower = [-3000.0, -3000.0, -3000.0] + [1.0] * n_measurements
+    bounds_upper = [3000.0, 3000.0, 3000.0] + [np.inf] * n_measurements
     
     try:
         result = least_squares(
@@ -125,12 +158,48 @@ def validate_offset(offset: np.ndarray, measurements: List[Dict]) -> Dict:
         errors.append(np.sqrt(az_error**2 + pitch_error**2))
     
     return {
-        'mean_error_deg': np.mean(errors),
-        'std_error_deg': np.std(errors),
-        'max_error_deg': np.max(errors),
-        'min_error_deg': np.min(errors),
-        'azimuth_errors': azimuth_errors,
-        'pitch_errors': pitch_errors,
+        'mean_error_deg': float(np.mean(errors)),
+        'std_error_deg': float(np.std(errors)),
+        'max_error_deg': float(np.max(errors)),
+        'min_error_deg': float(np.min(errors)),
+        'azimuth_errors': [float(x) for x in azimuth_errors],
+        'pitch_errors': [float(x) for x in pitch_errors],
+    }
+
+
+def calculate_calibration_from_measurements(measurements: List[Dict], min_samples: int = 5) -> Dict:
+    """
+    统一的雷达-光电在线/离线位置偏移计算入口。
+
+    measurements 中每项需要包含：
+      radar_az, radar_pitch, radar_range, optical_az, optical_pitch
+    """
+    if len(measurements) < min_samples:
+        return {
+            'success': False,
+            'reason': f'有效样本不足，需要至少{min_samples}组，当前{len(measurements)}组',
+            'sample_count': len(measurements),
+            'angle_stats': summarize_angle_offsets(measurements),
+        }
+
+    offset, ok = calculate_offset_from_measurements(measurements)
+    angle_stats = summarize_angle_offsets(measurements)
+    if not ok:
+        return {
+            'success': False,
+            'reason': '位置偏移优化失败',
+            'sample_count': len(measurements),
+            'angle_stats': angle_stats,
+        }
+
+    validation = validate_offset(offset, measurements)
+    return {
+        'success': True,
+        'offset': offset,
+        'sample_count': len(measurements),
+        'validation': validation,
+        'angle_stats': angle_stats,
+        'method': 'cal_offset_least_squares',
     }
 
 

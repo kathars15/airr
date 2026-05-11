@@ -27,8 +27,9 @@ SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from core.app_config import OPTICAL_MEASUREMENTS_FILE, TRACK_LOG_FILE  # noqa: E402
+from core.app_config import CALIBRATION_MIN_RANGE, OPTICAL_MEASUREMENTS_FILE, TRACK_LOG_FILE  # noqa: E402
 from core.calibration import DEFAULT_CALIBRATION_DATA_DIR  # noqa: E402
+from tools.cal_offset import calculate_calibration_from_measurements  # noqa: E402
 
 
 def normalize_track_id(value):
@@ -130,6 +131,13 @@ def pair_by_time(radar_records, optical_records, window):
     return pairs
 
 
+def filter_pairs_by_range(pairs, min_range):
+    return [
+        pair for pair in pairs
+        if float(pair[0].get("range", 0.0) or 0.0) >= min_range
+    ]
+
+
 def radar_to_position(azimuth, pitch, range_m):
     az = math.radians(azimuth)
     el = math.radians(pitch)
@@ -192,28 +200,63 @@ def angular_errors(offset, positions, dirs):
 
 
 def calculate_offset(pairs):
-    positions = np.asarray([
-        radar_to_position(r["azimuth"], r["pitch"], r["range"])
-        for r, _, _ in pairs
-    ], dtype=float)
-    dirs = np.asarray([
-        optical_to_direction(o["azimuth"], o["pitch"])
-        for _, o, _ in pairs
-    ], dtype=float)
+    measurements = pairs_to_cal_offset_measurements(pairs)
+    result = calculate_calibration_from_measurements(measurements)
+    if not result.get("success"):
+        raise RuntimeError(result.get("reason", "cal_offset calculation failed"))
 
-    offset = solve_offset(positions, dirs)
-    errors = angular_errors(offset, positions, dirs)
-    mask = robust_mask(errors)
-    if np.sum(mask) >= 5 and np.sum(mask) < len(pairs):
-        positions = positions[mask]
-        dirs = dirs[mask]
-        kept_pairs = [pair for pair, keep in zip(pairs, mask) if keep]
-        offset = solve_offset(positions, dirs)
-        errors = angular_errors(offset, positions, dirs)
-    else:
-        kept_pairs = pairs
+    validation = result.get("validation", {})
+    az_errors = np.asarray(validation.get("azimuth_errors", []), dtype=float)
+    pitch_errors = np.asarray(validation.get("pitch_errors", []), dtype=float)
+    errors = np.sqrt(az_errors ** 2 + pitch_errors ** 2)
 
-    return offset, errors, kept_pairs
+    return result["offset"], errors, pairs
+
+
+def pairs_to_cal_offset_measurements(pairs):
+    measurements = []
+    for radar, optical, _ in pairs:
+        measurements.append({
+            "radar_az": radar["azimuth"],
+            "radar_pitch": radar["pitch"],
+            "radar_range": radar["range"],
+            "optical_az": optical["azimuth"],
+            "optical_pitch": optical["pitch"],
+        })
+    return measurements
+
+
+def pairs_to_source_measurements(pairs, target_id=None, min_range=None, window=None):
+    samples = []
+    for radar, optical, dt in pairs:
+        samples.append({
+            "index": len(samples) + 1,
+            "time_diff_sec": float(dt),
+            "radar": {
+                "timestamp": float(radar["timestamp"]),
+                "track_id": radar.get("track_id"),
+                "raw_display_id": radar.get("raw_display_id"),
+                "azimuth": float(radar["azimuth"]),
+                "pitch": float(radar["pitch"]),
+                "range": float(radar["range"]),
+                "speed": float(radar["speed"]) if radar.get("speed") is not None else None,
+            },
+            "optical": {
+                "timestamp": float(optical["timestamp"]),
+                "azimuth": float(optical["azimuth"]),
+                "pitch": float(optical["pitch"]),
+                "range": float(optical.get("range", 0.0) or 0.0),
+                "status": optical.get("status"),
+            },
+        })
+
+    return {
+        "target_id": normalize_track_id(target_id) if target_id else None,
+        "sample_count": len(samples),
+        "min_radar_range_m": float(min_range) if min_range is not None else None,
+        "pair_time_window_sec": float(window) if window is not None else None,
+        "samples": samples,
+    }
 
 
 def summarize_raw_angle_diffs(pairs):
@@ -227,7 +270,7 @@ def summarize_raw_angle_diffs(pairs):
     return np.asarray(az_diffs, dtype=float), np.asarray(pitch_diffs, dtype=float)
 
 
-def save_position_offset(offset, errors, path):
+def save_position_offset(offset, errors, path, source_measurements=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = {
         "dx": float(offset[0]),
@@ -238,6 +281,8 @@ def save_position_offset(offset, errors, path):
         "use_position": True,
         "method": "offline_bearing_only",
     }
+    if source_measurements is not None:
+        data["source_measurements"] = source_measurements
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     return data
@@ -249,6 +294,12 @@ def main():
     parser.add_argument("--track-log", default=TRACK_LOG_FILE)
     parser.add_argument("--optical", default=OPTICAL_MEASUREMENTS_FILE)
     parser.add_argument("--window", type=float, default=0.5, help="Max radar/optical time difference in seconds")
+    parser.add_argument(
+        "--min-range",
+        type=float,
+        default=CALIBRATION_MIN_RANGE,
+        help="Only use radar/optical pairs whose radar range is at least this many meters",
+    )
     parser.add_argument("--save", action="store_true", help="Save result to calibration_data/position_offset.json")
     parser.add_argument("--force", action="store_true", help="Allow saving even when the estimated offset is suspicious")
     parser.add_argument("--max-offset", type=float, default=20.0, help="Reject --save if offset norm exceeds this many meters")
@@ -261,12 +312,14 @@ def main():
 
     radar_records = parse_track_log(args.track_log, args.target)
     optical_records = parse_optical_csv(args.optical)
-    pairs = pair_by_time(radar_records, optical_records, args.window)
+    all_pairs = pair_by_time(radar_records, optical_records, args.window)
+    pairs = filter_pairs_by_range(all_pairs, args.min_range)
 
     print(f"[offline] target: {normalize_track_id(args.target)}")
     print(f"[offline] radar records: {len(radar_records)}")
     print(f"[offline] optical records(status=2): {len(optical_records)}")
-    print(f"[offline] paired samples(window={args.window:.2f}s): {len(pairs)}")
+    print(f"[offline] paired samples(window={args.window:.2f}s): {len(all_pairs)}")
+    print(f"[offline] paired samples(range>={args.min_range:.0f}m): {len(pairs)}")
 
     if len(pairs) < 5:
         print("[offline] not enough pairs; need at least 5")
@@ -314,7 +367,13 @@ def main():
         if offset_norm > args.max_offset and not args.force:
             print("[offline] not saved. Use --force only if you are sure this large offset is physically correct.")
             return 3
-        data = save_position_offset(offset, errors, args.output)
+        source_measurements = pairs_to_source_measurements(
+            kept_pairs,
+            target_id=args.target,
+            min_range=args.min_range,
+            window=args.window,
+        )
+        data = save_position_offset(offset, errors, args.output, source_measurements)
         print(f"[offline] saved: {args.output}")
         print(f"[offline] saved samples: {data['sample_count']}")
 

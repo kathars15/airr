@@ -30,27 +30,34 @@ def get_calibration_status():
 def show_calibration_result():
     """显示校准结果"""
     result = calibrator.calibration_result
+    position = calibrator.position_offset
     if result['sample_count'] > 0:
         safe_print("\n" + "=" * 50)
         safe_print("当前校准参数:")
         safe_print(f"  方位角偏移: {result['azimuth_offset']:.2f}°")
         safe_print(f"  俯仰角偏移: {result['pitch_offset']:.2f}°")
         safe_print(f"  样本数量: {result['sample_count']}")
+        if result.get('method'):
+            safe_print(f"  角度算法: {result['method']}")
         safe_print(f"  时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(result['timestamp']))}")
+        if position.get('sample_count', 0) > 0:
+            safe_print("")
+            safe_print("位置偏移参数:")
+            safe_print(f"  dx(东向): {position['dx']:.2f}m")
+            safe_print(f"  dy(北向): {position['dy']:.2f}m")
+            safe_print(f"  dz(天向): {position['dz']:.2f}m")
+            safe_print(f"  是否启用: {'是' if position.get('use_position', False) else '否'}")
+            safe_print(f"  位置算法: {position.get('method', 'unknown')}")
+            if 'mean_error_deg' in position:
+                safe_print(
+                    f"  重投影误差: 均值={position['mean_error_deg']:.3f}°, "
+                    f"最大={position.get('max_error_deg', 0.0):.3f}°"
+                )
         safe_print("=" * 50)
     else:
         safe_print("暂无校准参数")
 
 def clear_calibration():
     """清除校准参数"""
-    calibrator.calibration_result = {
-        'azimuth_offset': 0.0,
-        'pitch_offset': 0.0,
-        'azimuth_scale': 1.0,
-        'pitch_scale': 1.0,
-        'timestamp': 0,
-        'sample_count': 0
-    }
-    calibrator.save_calibration()
-    safe_print("[校准] 已清除校准参数")
+    calibrator.clear_calibration()
 

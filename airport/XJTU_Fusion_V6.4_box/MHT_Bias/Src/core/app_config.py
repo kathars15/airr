@@ -3,7 +3,7 @@
 import os
 
 MAX_RANGE = 2500
-FAKE_DIS = 50
+FAKE_DIS = 70
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
@@ -34,6 +34,10 @@ OPTICAL_AI_TEMPLATE = 1
 # Optical angle/target reports are configured at 100 ms. Keep calibration pairing
 # tight enough to avoid matching the wrong radar scan moment.
 CALIBRATION_PAIR_TIME_WINDOW = 0.15
+
+# Radar angles are unreliable at close range in the current field setup.
+# Online and offline calibration only use paired samples at or beyond this range.
+CALIBRATION_MIN_RANGE = 800.0
 
 FRAME_HEAD_STATUS = 0xA0A0A7A7
 FRAME_TAIL_STATUS = 0x7A7A0A0A

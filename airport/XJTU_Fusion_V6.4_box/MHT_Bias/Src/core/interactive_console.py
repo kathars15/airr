@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import os
+import shutil
 
 import numpy as np
 
-from core.app_config import FAKE_DIS
+from core.app_config import DATA_DIR, FAKE_DIS
 from core.calibration import calibrator
 from core.calibration_commands import (
     clear_calibration,
@@ -17,6 +18,38 @@ from core.track_log import (
     get_track_by_id_from_log,
     safe_print_available_tracks_from_log,
 )
+
+
+class ConsoleExit(BaseException):
+    def __init__(self, clear_data=False):
+        super().__init__("interactive console requested exit")
+        self.clear_data = clear_data
+
+
+def clear_data_dir():
+    """清空 Src/data 目录中的运行数据。"""
+    deleted = 0
+    failed = []
+
+    if not os.path.isdir(DATA_DIR):
+        return deleted, failed
+
+    for entry in os.scandir(DATA_DIR):
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.remove(entry.path)
+            deleted += 1
+        except OSError as exc:
+            failed.append((entry.path, exc))
+
+    return deleted, failed
+
+
+def exit_program(clear_data=False):
+    raise ConsoleExit(clear_data=clear_data)
+
 
 
 def lock_target_for_follow(track_id, auto_track_state, auto_track_lock):
@@ -222,8 +255,7 @@ def interactive_console(
 
             if cmd in ['q', 'quit', 'exit']:
                 safe_print("正在退出...")
-                close_tracker()
-                os._exit(0)
+                exit_program(clear_data=True)
 
             if cmd in ['l', 'list']:
                 safe_print_available_tracks_from_log()
@@ -307,6 +339,12 @@ def interactive_console(
                     safe_print(f"               高偏移={result['dz']:.2f}m")
                     safe_print(f"  样本数量: {result['sample_count']}")
                     safe_print(f"  是否使用: {'是' if result.get('use_position', False) else '否'}")
+                    safe_print(f"  算法: {result.get('method', 'unknown')}")
+                    if 'mean_error_deg' in result:
+                        safe_print(
+                            f"  重投影误差: 均值={result['mean_error_deg']:.3f}°, "
+                            f"最大={result.get('max_error_deg', 0.0):.3f}°"
+                        )
                 else:
                     safe_print("暂无位置偏移校准参数")
 
@@ -383,11 +421,9 @@ def interactive_console(
 
         except KeyboardInterrupt:
             safe_print("\n正在退出...")
-            close_tracker()
-            os._exit(0)
+            exit_program(clear_data=False)
         except EOFError:
             safe_print("[控制台] 标准输入已关闭，交互控制台退出。")
-            close_tracker()
-            os._exit(0)
+            exit_program(clear_data=False)
         except Exception as e:
             safe_print(f"错误: {e}")

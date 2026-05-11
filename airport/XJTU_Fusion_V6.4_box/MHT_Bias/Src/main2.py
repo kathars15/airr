@@ -20,7 +20,7 @@ from core.app_config import (
 )
 from core.calibration import calibrator
 from core.console_utils import safe_print
-from core.interactive_console import interactive_console
+from core.interactive_console import ConsoleExit, clear_data_dir, interactive_console
 from core.optical_service import init_optical_tracker, send_to_optical
 from core.radar_receiver import receive_radar_data
 from core.radar_protocol import send_control_packet
@@ -190,6 +190,7 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
     Classify_Results = {}
     measurement_history = []
     estimation_history = []
+    track_update_seq = {}
     
     # 获取雷达航向用于极坐标转换
     current_radar_heading = 0
@@ -382,13 +383,15 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
                     speed = np.linalg.norm(vel_enu)
                     
                     track_id_str = f'Radar-{label_id_map[node.label]}'
+                    track_update_seq[track_id_str] = track_update_seq.get(track_id_str, 0) + 1
 
                     latest_tracks[track_id_str] = {
                         'valid': True,
                         'track_id': track_id_str,
                         'pos_enu': pos_enu.reshape(-1).tolist(),
                         'vel_enu': vel_enu.reshape(-1).tolist(),
-                        'last_update_time': time.time()
+                        'last_update_time': time.time(),
+                        'update_seq': track_update_seq[track_id_str],
                     }
 
                     # =========================
@@ -826,7 +829,8 @@ def get_current_track_motion(track_id):
             'track_id': motion.get('track_id'),
             'pos_enu': pos_enu,
             'vel_enu': vel_enu,
-            'last_update_time': float(motion.get('last_update_time', 0.0))
+            'last_update_time': float(motion.get('last_update_time', 0.0)),
+            'update_seq': int(motion.get('update_seq', 0)),
         }
     except Exception as e:
         safe_print(f"[共享状态] 解析 {track_id} 运动信息失败: {e}")
@@ -919,6 +923,7 @@ def auto_follow_loop():
 
     last_target_id = None
     last_successful_send = 0.0
+    last_sent_update_seq = None
     LOST_TIMEOUT = 5.0
 
     while True:
@@ -926,6 +931,7 @@ def auto_follow_loop():
             tracker = optical_service.tracker
             if not auto_track_config['enabled']:
                 last_target_id = None
+                last_sent_update_seq = None
                 time.sleep(0.2)
                 continue
 
@@ -939,11 +945,13 @@ def auto_follow_loop():
             if current_id is None:
                 if last_target_id is not None:
                     last_target_id = None
+                    last_sent_update_seq = None
                 time.sleep(0.2)
                 continue
 
             if current_id != last_target_id:
                 last_target_id = current_id
+                last_sent_update_seq = None
                 last_successful_send = time.time()
 
             elapsed_since_success = time.time() - last_successful_send
@@ -952,12 +960,18 @@ def auto_follow_loop():
                     tracker.release_target()
                     tracker.reset_zoom(125)
                 last_target_id = None
+                last_sent_update_seq = None
                 time.sleep(1)
                 continue
 
             motion = get_current_track_motion(current_id)
             if motion is None or not motion.get('valid', False):
                 time.sleep(0.1)
+                continue
+
+            update_seq = motion.get('update_seq', 0)
+            if update_seq == last_sent_update_seq:
+                time.sleep(0.2)
                 continue
 
             now = time.time()
@@ -992,8 +1006,9 @@ def auto_follow_loop():
 
             if True:  # 成功时
                 last_successful_send = time.time()
+                last_sent_update_seq = update_seq
                 
-            time.sleep(OPTICAL_SEND_INTERVAL)
+            time.sleep(0.2)
 
         except Exception as e:
             safe_print(f"[自动跟踪] 线程异常: {e}")
@@ -1009,6 +1024,7 @@ def manual_follow_loop():
 
     last_target_id = None
     last_successful_send = 0.0
+    last_sent_update_seq = None
     LOST_TIMEOUT = 5.0  # 手动模式下目标丢失超时（秒）
 
     while True:
@@ -1025,12 +1041,14 @@ def manual_follow_loop():
                     safe_print("[手动跟踪] 已退出手动模式")
                     last_target_id = None
                     last_successful_send = 0.0
+                    last_sent_update_seq = None
                 time.sleep(0.2)
                 continue
 
             # 目标刚切换或首次锁定
             if current_id != last_target_id:
                 last_target_id = current_id
+                last_sent_update_seq = None
                 last_successful_send = time.time()
                 safe_print(f"[手动跟踪] 开始跟随目标 {current_id}")
 
@@ -1046,6 +1064,7 @@ def manual_follow_loop():
                     auto_track_state['current_target'] = None
                     auto_track_state['manual_locked'] = False
                 last_target_id = None
+                last_sent_update_seq = None
                 time.sleep(1)
                 continue
 
@@ -1053,6 +1072,11 @@ def manual_follow_loop():
             motion = get_current_track_motion(current_id)
             if motion is None or not motion.get('valid', False):
                 safe_print(f"[手动跟踪] 等待目标 {current_id} 数据...")
+                time.sleep(0.2)
+                continue
+
+            update_seq = motion.get('update_seq', 0)
+            if update_seq == last_sent_update_seq:
                 time.sleep(0.2)
                 continue
 
@@ -1083,6 +1107,7 @@ def manual_follow_loop():
 
             if ok:
                 last_successful_send = time.time()
+                last_sent_update_seq = update_seq
                 if calibrator.calibration_mode and current_id == calibrator.current_target_id:
                     calibrator.add_radar_measurement(
                         current_id,
@@ -1098,7 +1123,7 @@ def manual_follow_loop():
             else:
                 safe_print(f"[手动跟踪] 发送失败，目标 {current_id}")
 
-            time.sleep(OPTICAL_SEND_INTERVAL)
+            time.sleep(0.2)
 
         except Exception as e:
             safe_print(f"[手动跟踪] 线程异常: {e}")
@@ -1280,6 +1305,43 @@ def auto_track_loop():
 
 # ==================== 主程序 ====================
 
+def _stop_process(process, name, timeout=5):
+    if process is None:
+        return
+
+    if not process.is_alive():
+        process.join(timeout=0.1)
+        return
+
+    safe_print(f"[退出] 等待{name}退出...")
+    process.join(timeout=timeout)
+    if process.is_alive():
+        safe_print(f"[退出] {name}未及时退出，强制结束")
+        process.terminate()
+        process.join(timeout=2)
+
+
+def shutdown_processes(process_receive, process_mht, data_queue, clear_data=False):
+    safe_print("[退出] 正在关闭光电连接...")
+    optical_service.close_tracker()
+
+    safe_print("[退出] 正在停止雷达接收进程...")
+    _stop_process(process_receive, "雷达接收进程", timeout=3)
+
+    safe_print("[退出] 正在停止MHT进程...")
+    try:
+        data_queue.put(None)
+    except Exception:
+        pass
+    _stop_process(process_mht, "MHT进程", timeout=8)
+
+    if clear_data:
+        deleted, failed = clear_data_dir()
+        safe_print(f"[数据] 已清空 data 目录，删除 {deleted} 项")
+        for path, exc in failed:
+            safe_print(f"[数据] 删除失败: {path} ({exc})")
+
+
 if __name__ == "__main__":
     print("[BOOT] entering main startup", flush=True)
     multiprocessing.freeze_support()
@@ -1369,12 +1431,23 @@ if __name__ == "__main__":
     time.sleep(2)
     
     # 启动交互控制台（在主线程中运行）
-    interactive_console(
-        tracker_getter=lambda: optical_service.tracker,
-        auto_track_config=auto_track_config,
-        auto_track_state=auto_track_state,
-        auto_track_lock=auto_track_lock,
-        calibration_queue=calibration_queue,
-        get_current_track_motion=get_current_track_motion,
-    )
+    clear_data_on_exit = False
+    try:
+        interactive_console(
+            tracker_getter=lambda: optical_service.tracker,
+            auto_track_config=auto_track_config,
+            auto_track_state=auto_track_state,
+            auto_track_lock=auto_track_lock,
+            calibration_queue=calibration_queue,
+            get_current_track_motion=get_current_track_motion,
+        )
+    except ConsoleExit as exc:
+        clear_data_on_exit = exc.clear_data
+    finally:
+        shutdown_processes(
+            process_receive,
+            process_mht,
+            Data2Process_Buffer,
+            clear_data=clear_data_on_exit,
+        )
 
