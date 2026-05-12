@@ -368,7 +368,6 @@ class RadarOpticalCalibrator:
         """
         # 优先使用位置偏移校准
         if self.position_offset.get('use_position', False) and radar_range is not None and radar_range > 0:
-            if 
             return self.apply_position_offset(radar_azimuth, radar_pitch, radar_range)
         else:
             return self.apply_angle_offset(radar_azimuth, radar_pitch)

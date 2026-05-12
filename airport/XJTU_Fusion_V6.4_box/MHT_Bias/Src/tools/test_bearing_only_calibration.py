@@ -43,14 +43,14 @@ def run_case(noise_deg=0.0, seed=7):
     calibrator = RadarOpticalCalibrator(data_dir=tempfile.mkdtemp(prefix="bearing_cal_"))
 
     target_specs = [
-        (20, 2, 420),
-        (55, 5, 650),
+        (20, 2, 820),
+        (55, 5, 950),
         (95, -1, 800),
-        (140, 8, 520),
+        (140, 8, 1020),
         (185, 4, 900),
-        (230, -3, 760),
-        (280, 6, 610),
-        (330, 1, 700),
+        (230, -3, 1160),
+        (280, 6, 1010),
+        (330, 1, 870),
     ]
 
     for i, (radar_az, radar_pitch, radar_range) in enumerate(target_specs):
