@@ -21,6 +21,11 @@ except ImportError:
     SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_CALIBRATION_DATA_DIR = os.path.join(SCRIPT_DIR, "calibration_data")
+STABILITY_BIN_SIZE_M = 100.0
+STABILITY_MIN_SAMPLES_PER_BIN = 3
+STABILITY_MAX_PITCH_STD_DEG = 0.35
+STABILITY_MAX_BIN_PITCH_JUMP_DEG = 1.0
+STABILITY_MAX_SAMPLE_GAP_M = 150.0
 
 
 class RadarOpticalCalibrator:
@@ -35,6 +40,8 @@ class RadarOpticalCalibrator:
 
         self.radar_buffer = deque(maxlen=10)
         self.optical_buffer = deque(maxlen=10)
+        self.radar_stability_samples = []
+        self.radar_stability_report = self._empty_stability_report()
 
         self.calibration_result = {
             'azimuth_offset': 0.0,
@@ -82,6 +89,8 @@ class RadarOpticalCalibrator:
         self.current_target_id = target_id
         self.radar_measurements = []
         self.optical_measurements = []
+        self.radar_stability_samples = []
+        self.radar_stability_report = self._empty_stability_report()
         self.radar_buffer.clear()
         self.optical_buffer.clear()
         print(f"[校准] 开始校准，目标: {target_id}")
@@ -95,7 +104,13 @@ class RadarOpticalCalibrator:
 
         if len(self.radar_measurements) < 5:
             print(f"[校准] 数据不足，需要至少5组数据，当前有{len(self.radar_measurements)}组")
+            self.print_radar_stability_summary()
+            self.save_radar_stability_report()
             return False
+
+        self.analyze_radar_stability()
+        self.print_radar_stability_summary()
+        self.save_radar_stability_report()
 
         print("[校准] 使用 cal_offset 位置偏移算法计算参数...")
         if self.calculate_position_offset():
@@ -132,6 +147,7 @@ class RadarOpticalCalibrator:
         if timestamp is None:
             timestamp = time.time()
 
+        self.add_radar_stability_sample(track_id, azimuth, pitch, range_m, timestamp)
         self.radar_buffer.append({
             'timestamp': timestamp,
             'track_id': track_id,
@@ -140,6 +156,183 @@ class RadarOpticalCalibrator:
             'range': range_m,
         })
         self._try_pair_measurement()
+
+    def _empty_stability_report(self):
+        return {
+            'target_id': self.current_target_id,
+            'sample_count': 0,
+            'bin_size_m': STABILITY_BIN_SIZE_M,
+            'min_samples_per_bin': STABILITY_MIN_SAMPLES_PER_BIN,
+            'max_pitch_std_deg': STABILITY_MAX_PITCH_STD_DEG,
+            'max_bin_pitch_jump_deg': STABILITY_MAX_BIN_PITCH_JUMP_DEG,
+            'max_sample_gap_m': STABILITY_MAX_SAMPLE_GAP_M,
+            'stable_ranges': [],
+            'bins': [],
+            'timestamp': 0,
+        }
+
+    def add_radar_stability_sample(self, track_id, azimuth, pitch, range_m, timestamp=None):
+        """记录雷达俯仰稳定性分析样本。"""
+        try:
+            range_value = float(range_m)
+            pitch_value = float(pitch)
+            azimuth_value = float(azimuth)
+        except (TypeError, ValueError):
+            return
+
+        if range_value <= 0:
+            return
+
+        if timestamp is None:
+            timestamp = time.time()
+
+        self.radar_stability_samples.append({
+            'timestamp': float(timestamp),
+            'track_id': track_id,
+            'range': range_value,
+            'azimuth': azimuth_value,
+            'pitch': pitch_value,
+        })
+
+    def analyze_radar_stability(self):
+        """按距离分箱分析雷达俯仰角稳定范围。"""
+        samples = list(self.radar_stability_samples)
+        report = self._empty_stability_report()
+        report['target_id'] = self.current_target_id
+        report['sample_count'] = len(samples)
+        report['timestamp'] = time.time()
+
+        if len(samples) < STABILITY_MIN_SAMPLES_PER_BIN:
+            self.radar_stability_report = report
+            return report
+
+        grouped = {}
+        for sample in samples:
+            bin_start = int(sample['range'] // STABILITY_BIN_SIZE_M) * int(STABILITY_BIN_SIZE_M)
+            grouped.setdefault(bin_start, []).append(sample)
+
+        bins = []
+        for bin_start in sorted(grouped):
+            values = grouped[bin_start]
+            ranges = np.array([v['range'] for v in values], dtype=float)
+            pitches = np.array([v['pitch'] for v in values], dtype=float)
+            pitch_std = float(np.std(pitches))
+            pitch_mean = float(np.mean(pitches))
+            pitch_median = float(np.median(pitches))
+            pitch_min = float(np.min(pitches))
+            pitch_max = float(np.max(pitches))
+            stable = (
+                len(values) >= STABILITY_MIN_SAMPLES_PER_BIN
+                and pitch_std <= STABILITY_MAX_PITCH_STD_DEG
+            )
+            bins.append({
+                'start_m': float(bin_start),
+                'end_m': float(bin_start + STABILITY_BIN_SIZE_M),
+                'sample_count': len(values),
+                'range_min_m': float(np.min(ranges)),
+                'range_max_m': float(np.max(ranges)),
+                'pitch_mean_deg': pitch_mean,
+                'pitch_median_deg': pitch_median,
+                'pitch_std_deg': pitch_std,
+                'pitch_min_deg': pitch_min,
+                'pitch_max_deg': pitch_max,
+                'stable': stable,
+            })
+
+        report['bins'] = bins
+        report['stable_ranges'] = self._find_stable_ranges_from_samples(samples)
+        self.radar_stability_report = report
+        return report
+
+    def _find_stable_ranges_from_samples(self, samples):
+        """从按距离排序的样本中寻找俯仰角稳定的连续距离段。"""
+        sorted_samples = sorted(samples, key=lambda item: item['range'])
+        ranges = []
+        current = []
+
+        def summarize(segment):
+            if len(segment) < STABILITY_MIN_SAMPLES_PER_BIN:
+                return None
+            pitches = np.array([item['pitch'] for item in segment], dtype=float)
+            distances = np.array([item['range'] for item in segment], dtype=float)
+            pitch_std = float(np.std(pitches))
+            if pitch_std > STABILITY_MAX_PITCH_STD_DEG:
+                return None
+            return {
+                'start_m': float(np.floor(np.min(distances) / STABILITY_BIN_SIZE_M) * STABILITY_BIN_SIZE_M),
+                'end_m': float(np.ceil(np.max(distances) / STABILITY_BIN_SIZE_M) * STABILITY_BIN_SIZE_M),
+                'range_min_m': float(np.min(distances)),
+                'range_max_m': float(np.max(distances)),
+                'sample_count': len(segment),
+                'pitch_mean_deg': float(np.mean(pitches)),
+                'pitch_median_start_deg': float(np.median(pitches)),
+                'pitch_median_end_deg': float(np.median(pitches)),
+                'pitch_std_max_deg': pitch_std,
+                'pitch_min_deg': float(np.min(pitches)),
+                'pitch_max_deg': float(np.max(pitches)),
+            }
+
+        def flush_current():
+            nonlocal current
+            summary = summarize(current)
+            if summary:
+                ranges.append(summary)
+            current = []
+
+        for sample in sorted_samples:
+            if not current:
+                current = [sample]
+                continue
+
+            previous = current[-1]
+            gap = sample['range'] - previous['range']
+            pitch_jump = abs(sample['pitch'] - previous['pitch'])
+            candidate = current + [sample]
+            candidate_pitches = np.array([item['pitch'] for item in candidate], dtype=float)
+            candidate_std = float(np.std(candidate_pitches))
+
+            if (
+                gap <= STABILITY_MAX_SAMPLE_GAP_M
+                and pitch_jump <= STABILITY_MAX_BIN_PITCH_JUMP_DEG
+                and candidate_std <= STABILITY_MAX_PITCH_STD_DEG
+            ):
+                current = candidate
+            else:
+                flush_current()
+                current = [sample]
+
+        flush_current()
+        return ranges
+
+    def format_radar_stability_summary(self):
+        report = self.analyze_radar_stability()
+        ranges = report.get('stable_ranges', [])
+        if not ranges:
+            return (
+                f"[雷达稳定性] 当前样本 {report.get('sample_count', 0)} 组，"
+                "暂未识别到俯仰稳定距离段"
+            )
+
+        parts = []
+        for item in ranges:
+            parts.append(
+                f"{item['start_m']:.0f}-{item['end_m']:.0f}m"
+                f"(n={item['sample_count']}, std≤{item['pitch_std_max_deg']:.2f}°)"
+            )
+        return (
+            f"[雷达稳定性] 当前样本 {report.get('sample_count', 0)} 组，"
+            f"俯仰稳定距离段: {', '.join(parts)}"
+        )
+
+    def print_radar_stability_summary(self):
+        print(self.format_radar_stability_summary())
+
+    def save_radar_stability_report(self):
+        file_path = os.path.join(self.data_dir, 'radar_stability_report.json')
+        report = self.analyze_radar_stability()
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        print(f"[雷达稳定性] 报告已保存: {file_path}")
 
     def add_optical_measurement(self, azimuth, pitch, timestamp=None, optical_status=None, opt_range=None):
         """添加光电实际角度和距离。"""
@@ -510,6 +703,8 @@ class RadarOpticalCalibrator:
             'target_id': self.current_target_id,
             'radar_samples': len(self.radar_measurements),
             'optical_samples': len(self.optical_measurements),
+            'radar_stability_samples': len(self.radar_stability_samples),
+            'radar_stable_ranges': self.analyze_radar_stability().get('stable_ranges', []),
             'has_calibration': self.calibration_result['sample_count'] > 0,
             'has_position': self.position_offset['sample_count'] > 0,
             'use_position': self.position_offset.get('use_position', False),
@@ -520,6 +715,8 @@ class RadarOpticalCalibrator:
         """清除校准参数和本次采集样本。"""
         self.radar_measurements = []
         self.optical_measurements = []
+        self.radar_stability_samples = []
+        self.radar_stability_report = self._empty_stability_report()
         self.radar_buffer.clear()
         self.optical_buffer.clear()
         self.calibration_result = {

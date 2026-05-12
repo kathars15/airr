@@ -22,9 +22,22 @@ def get_calibration_status():
     """获取校准状态"""
     status = calibrator.get_status()
     if status['mode']:
-        safe_print(f"[校准] 进行中: 目标={status['target_id']}, 已采集={status['radar_samples']}组")
+        safe_print(
+            f"[校准] 进行中: 目标={status['target_id']}, "
+            f"已配对={status['radar_samples']}组, 雷达稳定性样本={status.get('radar_stability_samples', 0)}组"
+        )
     else:
         safe_print(f"[校准] 未进行, 已有校准参数: {'是' if status['has_calibration'] else '否'}")
+    stable_ranges = status.get('radar_stable_ranges', [])
+    if stable_ranges:
+        text = ", ".join(
+            f"{item['start_m']:.0f}-{item['end_m']:.0f}m"
+            f"(n={item['sample_count']}, std≤{item['pitch_std_max_deg']:.2f}°)"
+            for item in stable_ranges
+        )
+        safe_print(f"[雷达稳定性] 俯仰稳定距离段: {text}")
+    else:
+        safe_print("[雷达稳定性] 暂未识别到俯仰稳定距离段")
     return status
 
 def show_calibration_result():
@@ -56,6 +69,7 @@ def show_calibration_result():
         safe_print("=" * 50)
     else:
         safe_print("暂无校准参数")
+    safe_print(calibrator.format_radar_stability_summary())
 
 def clear_calibration():
     """清除校准参数"""
