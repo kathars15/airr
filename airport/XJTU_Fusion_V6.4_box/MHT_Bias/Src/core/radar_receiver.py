@@ -76,7 +76,7 @@ def _append_raw_tracks(timestamp, tracks):
         safe_print(f"[raw_tracks] write failed: {e}")
 
 
-def receive_radar_data(Data2Process_Buffer):
+def receive_radar_data(Data2Process_Buffer, PointDebug_Buffer=None):
     """UDP接收雷达数据，解析并存入缓冲区"""
     from Sensor_Config.sensor_config import SignalType2Name, lla_original
 

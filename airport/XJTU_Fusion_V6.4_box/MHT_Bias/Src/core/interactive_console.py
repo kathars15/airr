@@ -241,7 +241,8 @@ def interactive_console(
     safe_print("  cres            - 显示校准参数")
     safe_print("  cclear          - 清除校准参数")
     safe_print("  ctest           - 测试校准效果")
-    safe_print("\n  q / quit        - 退出程序")
+    safe_print("\n  q / quit        - 退出程序并清空 data")
+    safe_print("  qq              - 退出程序但保留 data")
     safe_print("=" * 60)
 
     while True:
@@ -252,6 +253,10 @@ def interactive_console(
 
             cmd_parts = cmd_input.split()
             cmd = cmd_parts[0].lower()
+
+            if cmd == 'qq':
+                safe_print("正在退出...（保留 data 文件）")
+                exit_program(clear_data=False)
 
             if cmd in ['q', 'quit', 'exit']:
                 safe_print("正在退出...")
@@ -285,10 +290,18 @@ def interactive_console(
                     safe_print(f"[校准] 目标不存在: {track_id}")
                     continue
 
-                calibrator.start_calibration(track_id)
-                calibration_queue.put({'type': 'start', 'target_id': track_id})
-                safe_print("[cal] sampling only; optical auto-search is not started. Use t <ID> separately if needed.")
-                safe_print(f"[校准] 已开始: {track_id}，请保持目标稳定并让光电进入跟踪状态")
+                if calibrator.calibration_mode:
+                    result = calibrator.switch_calibration_target(track_id)
+                    if result == 'switched':
+                        calibration_queue.put({'type': 'start', 'target_id': track_id})
+                        safe_print(f"[calibration] switched to {track_id}, keeping existing samples")
+                    else:
+                        safe_print(f"[calibration] target still {track_id}, continue current session")
+                else:
+                    calibrator.start_calibration(track_id)
+                    calibration_queue.put({'type': 'start', 'target_id': track_id})
+                    safe_print("[cal] sampling only; optical auto-search is not started. Use t <ID> separately if needed.")
+                    safe_print(f"[calibration] started: {track_id}, keep target stable and optical tracking on")
 
             elif cmd in ['done', 'cstp']:
                 calibration_queue.put({'type': 'stop'})

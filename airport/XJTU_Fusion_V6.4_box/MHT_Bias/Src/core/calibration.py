@@ -12,6 +12,7 @@ import time
 from collections import deque
 
 import numpy as np
+from core.track_smoothing import OpticalAngleSmoother, TrackAngleSmoother
 
 try:
     from core.app_config import CALIBRATION_MIN_RANGE, CALIBRATION_PAIR_TIME_WINDOW, SCRIPT_DIR
@@ -26,6 +27,36 @@ STABILITY_MIN_SAMPLES_PER_BIN = 3
 STABILITY_MAX_PITCH_STD_DEG = 0.35
 STABILITY_MAX_BIN_PITCH_JUMP_DEG = 1.0
 STABILITY_MAX_SAMPLE_GAP_M = 150.0
+CAL_RADAR_SMOOTH_WINDOW = 3
+CAL_RADAR_SMOOTH_MAX_AGE_SEC = 5.0
+CAL_OPTICAL_SMOOTH_WINDOW = 3
+CAL_OPTICAL_SMOOTH_MAX_AGE_SEC = 5.0
+
+
+def _empty_6dof_params(method):
+    return {
+        'dx': 0.0,
+        'dy': 0.0,
+        'dz': 0.0,
+        'az_rotation': 0.0,
+        'pitch_rotation': 0.0,
+        'mean_error_deg': 0.0,
+        'std_error_deg': 0.0,
+        'max_error_deg': 0.0,
+        'timestamp': 0,
+        'sample_count': 0,
+        'method': method,
+    }
+
+
+def _empty_segmented_6dof_entry():
+    data = _empty_6dof_params('segmented_6dof')
+    data.update({
+        'range_min_m': 0.0,
+        'range_max_m': 0.0,
+        'range_label': '',
+    })
+    return data
 
 
 class RadarOpticalCalibrator:
@@ -37,11 +68,20 @@ class RadarOpticalCalibrator:
         self.optical_measurements = []
         self.current_target_id = None
         self.calibration_mode = False
+        self.calibration_target_history = []
 
         self.radar_buffer = deque(maxlen=10)
         self.optical_buffer = deque(maxlen=10)
         self.radar_stability_samples = []
         self.radar_stability_report = self._empty_stability_report()
+        self.radar_smoother = TrackAngleSmoother(
+            window_size=CAL_RADAR_SMOOTH_WINDOW,
+            max_age_sec=CAL_RADAR_SMOOTH_MAX_AGE_SEC,
+        )
+        self.optical_smoother = OpticalAngleSmoother(
+            window_size=CAL_OPTICAL_SMOOTH_WINDOW,
+            max_age_sec=CAL_OPTICAL_SMOOTH_MAX_AGE_SEC,
+        )
 
         self.calibration_result = {
             'azimuth_offset': 0.0,
@@ -62,22 +102,9 @@ class RadarOpticalCalibrator:
         }
 
         self.RANGE_THRESHOLD = 1200.0
-        self.far_params = {
-            'dx': -385.7, 'dy': -74.2, 'dz': 19.8,
-            'az_rotation': -15.19,
-            'pitch_rotation': -1.87,
-            'mean_error_deg': 0.87,
-            'timestamp': 0,
-            'sample_count': 23,
-        }
-        self.near_params = {
-            'dx': -451.3, 'dy': -98.6, 'dz': 35.4,
-            'az_rotation': -15.27,
-            'pitch_rotation': -2.84,
-            'mean_error_deg': 1.68,
-            'timestamp': 0,
-            'sample_count': 6,
-        }
+        self.far_params = _empty_6dof_params('far_6dof')
+        self.near_params = _empty_6dof_params('near_6dof')
+        self.segmented_6dof_params = []
 
         self.load_calibration()
         self.load_position_offset()
@@ -87,16 +114,42 @@ class RadarOpticalCalibrator:
         """开始校准。"""
         self.calibration_mode = True
         self.current_target_id = target_id
+        self.calibration_target_history = [target_id]
         self.radar_measurements = []
         self.optical_measurements = []
         self.radar_stability_samples = []
         self.radar_stability_report = self._empty_stability_report()
         self.radar_buffer.clear()
         self.optical_buffer.clear()
+        self.radar_smoother.reset()
+        self.optical_smoother.reset()
         print(f"[校准] 开始校准，目标: {target_id}")
         print(f"[校准] 雷达扫描周期: 4秒，建议采集10-20组数据")
         print(f"[校准] 距离过滤: 仅采集雷达距离 >= {CALIBRATION_MIN_RANGE:.0f}m 的配对数据")
         return True
+
+    def switch_calibration_target(self, target_id):
+        """Switch calibration target without clearing collected samples."""
+        if not self.calibration_mode:
+            return self.start_calibration(target_id)
+
+        if target_id == self.current_target_id:
+            print(
+                f"[calibration] target unchanged: {target_id}, "
+                f"keep {len(self.radar_measurements)} paired samples"
+            )
+            return 'unchanged'
+
+        self.current_target_id = target_id
+        if target_id not in self.calibration_target_history:
+            self.calibration_target_history.append(target_id)
+        self.radar_buffer.clear()
+        self.optical_buffer.clear()
+        print(
+            f"[calibration] switched target: {target_id}, "
+            f"keep {len(self.radar_measurements)} paired samples and continue"
+        )
+        return 'switched'
 
     def stop_calibration(self):
         """停止校准并计算/保存参数。"""
@@ -114,6 +167,7 @@ class RadarOpticalCalibrator:
 
         print("[校准] 使用 cal_offset 位置偏移算法计算参数...")
         if self.calculate_position_offset():
+            self.calculate_segmented_6dof_params()
             self.save_calibration()
             self.save_position_offset()
             self.save_6dof_params()
@@ -131,6 +185,7 @@ class RadarOpticalCalibrator:
 
         print("[校准] cal_offset 位置偏移校准失败，回退到角度偏移校准...")
         self._calculate_calibration()
+        self.calculate_segmented_6dof_params()
         self.save_calibration()
         self.save_6dof_params()
         print("[校准] 角度偏移校准完成！")
@@ -147,19 +202,34 @@ class RadarOpticalCalibrator:
         if timestamp is None:
             timestamp = time.time()
 
-        self.add_radar_stability_sample(track_id, azimuth, pitch, range_m, timestamp)
+        raw_range = range_m
+        raw_azimuth = azimuth
+        raw_pitch = pitch
+        range_m, azimuth, pitch = self.radar_smoother.smooth(
+            track_id,
+            timestamp,
+            range_m,
+            azimuth,
+            pitch,
+        )
+
+        self.add_radar_stability_sample(track_id, raw_azimuth, raw_pitch, raw_range, timestamp)
         self.radar_buffer.append({
             'timestamp': timestamp,
             'track_id': track_id,
             'azimuth': azimuth,
             'pitch': pitch,
             'range': range_m,
+            'raw_azimuth': raw_azimuth,
+            'raw_pitch': raw_pitch,
+            'raw_range': raw_range,
         })
         self._try_pair_measurement()
 
     def _empty_stability_report(self):
         return {
             'target_id': self.current_target_id,
+            'target_history': list(self.calibration_target_history),
             'sample_count': 0,
             'bin_size_m': STABILITY_BIN_SIZE_M,
             'min_samples_per_bin': STABILITY_MIN_SAMPLES_PER_BIN,
@@ -259,8 +329,8 @@ class RadarOpticalCalibrator:
             if pitch_std > STABILITY_MAX_PITCH_STD_DEG:
                 return None
             return {
-                'start_m': float(np.floor(np.min(distances) / STABILITY_BIN_SIZE_M) * STABILITY_BIN_SIZE_M),
-                'end_m': float(np.ceil(np.max(distances) / STABILITY_BIN_SIZE_M) * STABILITY_BIN_SIZE_M),
+                'start_m': float(np.min(distances)),
+                'end_m': float(np.max(distances)),
                 'range_min_m': float(np.min(distances)),
                 'range_max_m': float(np.max(distances)),
                 'sample_count': len(segment),
@@ -316,7 +386,7 @@ class RadarOpticalCalibrator:
         parts = []
         for item in ranges:
             parts.append(
-                f"{item['start_m']:.0f}-{item['end_m']:.0f}m"
+                f"{item['range_min_m']:.0f}-{item['range_max_m']:.0f}m"
                 f"(n={item['sample_count']}, std≤{item['pitch_std_max_deg']:.2f}°)"
             )
         return (
@@ -345,12 +415,25 @@ class RadarOpticalCalibrator:
         if timestamp is None:
             timestamp = time.time()
 
+        raw_azimuth = azimuth
+        raw_pitch = pitch
+        raw_range = opt_range if opt_range else 0
+        azimuth, pitch, opt_range = self.optical_smoother.smooth(
+            timestamp,
+            azimuth,
+            pitch,
+            opt_range,
+        )
+
         self.optical_buffer.append({
             'timestamp': timestamp,
             'azimuth': azimuth,
             'pitch': pitch,
             'range': opt_range if opt_range else 0,
             'status': optical_status,
+            'raw_azimuth': raw_azimuth,
+            'raw_pitch': raw_pitch,
+            'raw_range': raw_range,
         })
         self._try_pair_measurement()
 
@@ -551,7 +634,108 @@ class RadarOpticalCalibrator:
         data['source_measurements'] = source
         return data
 
+    def _get_segment_measurements(self, range_min_m, range_max_m):
+        measurements = []
+        for r, o in zip(self.radar_measurements, self.optical_measurements):
+            try:
+                radar_range = float(r.get('range', 0))
+                if radar_range < CALIBRATION_MIN_RANGE:
+                    continue
+                if radar_range < range_min_m or radar_range > range_max_m:
+                    continue
+                measurements.append({
+                    'radar_az': float(r['azimuth']),
+                    'radar_pitch': float(r['pitch']),
+                    'radar_range': radar_range,
+                    'optical_az': float(o['azimuth']),
+                    'optical_pitch': float(o['pitch']),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        return measurements
+
+    def _build_segment_source_measurements(self, range_min_m, range_max_m):
+        source = self.get_source_measurements()
+        samples = []
+        for item in source.get('samples', []):
+            radar = item.get('radar', {})
+            radar_range = float(radar.get('range', 0) or 0)
+            if range_min_m <= radar_range <= range_max_m:
+                samples.append(item)
+        return {
+            'target_id': source.get('target_id'),
+            'sample_count': len(samples),
+            'min_radar_range_m': float(range_min_m),
+            'max_radar_range_m': float(range_max_m),
+            'pair_time_window_sec': source.get('pair_time_window_sec'),
+            'samples': samples,
+        }
+
+    def calculate_segmented_6dof_params(self):
+        self.segmented_6dof_params = []
+        stable_ranges = self.analyze_radar_stability().get('stable_ranges', [])
+        if not stable_ranges:
+            print("[校准] 未识别到稳定距离段，跳过分段参数计算")
+            return False
+
+        try:
+            from tools.cal_offset import calculate_calibration_from_measurements
+        except ImportError as exc:
+            print(f"[校准] 无法导入 tools.cal_offset: {exc}")
+            return False
+
+        success_count = 0
+        for index, stable_range in enumerate(stable_ranges, start=1):
+            range_min_m = float(stable_range['range_min_m'])
+            range_max_m = float(stable_range['range_max_m'])
+            range_label = f"{range_min_m:.0f}-{range_max_m:.0f}m"
+            measurements = self._get_segment_measurements(range_min_m, range_max_m)
+            if len(measurements) < STABILITY_MIN_SAMPLES_PER_BIN:
+                print(f"[校准] 稳定段 {range_label} 样本不足，跳过")
+                continue
+
+            result = calculate_calibration_from_measurements(
+                measurements,
+                min_samples=STABILITY_MIN_SAMPLES_PER_BIN,
+            )
+            if not result.get('success'):
+                print(f"[校准] 稳定段 {range_label} 参数计算失败: {result.get('reason', '未知原因')}")
+                continue
+
+            offset = result['offset']
+            validation = result.get('validation', {})
+            segment_params = _empty_segmented_6dof_entry()
+            segment_params.update({
+                'dx': float(offset[0]),
+                'dy': float(offset[1]),
+                'dz': float(offset[2]),
+                'az_rotation': 0.0,
+                'pitch_rotation': 0.0,
+                'mean_error_deg': float(validation.get('mean_error_deg', 0.0)),
+                'std_error_deg': float(validation.get('std_error_deg', 0.0)),
+                'max_error_deg': float(validation.get('max_error_deg', 0.0)),
+                'timestamp': time.time(),
+                'sample_count': int(result.get('sample_count', len(measurements))),
+                'method': result.get('method', 'segmented_6dof'),
+                'range_min_m': range_min_m,
+                'range_max_m': range_max_m,
+                'range_label': range_label,
+                'source_measurements': self._build_segment_source_measurements(range_min_m, range_max_m),
+            })
+            self.segmented_6dof_params.append(segment_params)
+            success_count += 1
+            print(
+                f"[校准] 稳定段 {index} {range_label} 参数完成: "
+                f"dx={segment_params['dx']:.2f}m, dy={segment_params['dy']:.2f}m, dz={segment_params['dz']:.2f}m, "
+                f"误差均值={segment_params['mean_error_deg']:.3f}°"
+            )
+
+        self.segmented_6dof_params.sort(key=lambda item: item.get('range_min_m', 0.0))
+        return success_count > 0
+
     def has_6dof_params(self):
+        if self.segmented_6dof_params:
+            return True
         return (
             self.far_params.get('sample_count', 0) > 0
             and self.near_params.get('sample_count', 0) > 0
@@ -602,7 +786,21 @@ class RadarOpticalCalibrator:
         if radar_range is None or radar_range <= 0:
             return self.apply_angle_offset(radar_azimuth, radar_pitch)
 
+        for params in self.segmented_6dof_params:
+            if params.get('sample_count', 0) <= 0:
+                continue
+            range_min_m = float(params.get('range_min_m', 0.0))
+            range_max_m = float(params.get('range_max_m', 0.0))
+            if range_min_m <= radar_range <= range_max_m:
+                return self._apply_6dof_with_params(radar_azimuth, radar_pitch, radar_range, params)
+
         params = self.near_params if radar_range < self.RANGE_THRESHOLD else self.far_params
+        if params.get('sample_count', 0) <= 0:
+            return self.apply_position_offset(radar_azimuth, radar_pitch, radar_range)
+
+        return self._apply_6dof_with_params(radar_azimuth, radar_pitch, radar_range, params)
+
+    def _apply_6dof_with_params(self, radar_azimuth, radar_pitch, radar_range, params):
         if params.get('sample_count', 0) <= 0:
             return self.apply_position_offset(radar_azimuth, radar_pitch, radar_range)
 
@@ -662,7 +860,7 @@ class RadarOpticalCalibrator:
                 self.position_offset.update(loaded)
             print(
                 f"[校准] 已加载位置偏移: DX={self.position_offset['dx']:.2f}m, "
-                f"DY={self.position_offset['dy']:.2f}m, DZ={self.position_offset['dz']:.2f}m"
+                f"DY={self.position_offset['dy']:.2f}m, dz={self.position_offset['dz']:.2f}m"
             )
             return True
         return False
@@ -680,6 +878,11 @@ class RadarOpticalCalibrator:
                 data = json.load(f)
                 self.far_params.update(data.get('far', {}))
                 self.near_params.update(data.get('near', {}))
+                self.segmented_6dof_params = []
+                for item in data.get('segments', []):
+                    segment = _empty_segmented_6dof_entry()
+                    segment.update(item)
+                    self.segmented_6dof_params.append(segment)
             print("[校准] 已加载6DoF参数")
             return True
         return False
@@ -689,6 +892,7 @@ class RadarOpticalCalibrator:
         data = {
             'far': self.far_params,
             'near': self.near_params,
+            'segments': self.segmented_6dof_params,
             'range_threshold': self.RANGE_THRESHOLD,
             'timestamp': time.time(),
             'source_measurements': self.get_source_measurements(),
@@ -697,10 +901,17 @@ class RadarOpticalCalibrator:
             json.dump(data, f, indent=2, ensure_ascii=False)
         print(f"[校准] 6DoF参数已保存: {file_path}")
 
+    def _delete_calibration_file(self, filename):
+        file_path = os.path.join(self.data_dir, filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"[calibration] deleted parameter file: {file_path}")
+
     def get_status(self):
         return {
             'mode': self.calibration_mode,
             'target_id': self.current_target_id,
+            'target_history': list(self.calibration_target_history),
             'radar_samples': len(self.radar_measurements),
             'optical_samples': len(self.optical_measurements),
             'radar_stability_samples': len(self.radar_stability_samples),
@@ -715,10 +926,15 @@ class RadarOpticalCalibrator:
         """清除校准参数和本次采集样本。"""
         self.radar_measurements = []
         self.optical_measurements = []
+        self.current_target_id = None
+        self.calibration_mode = False
+        self.calibration_target_history = []
         self.radar_stability_samples = []
         self.radar_stability_report = self._empty_stability_report()
         self.radar_buffer.clear()
         self.optical_buffer.clear()
+        self.radar_smoother.reset()
+        self.optical_smoother.reset()
         self.calibration_result = {
             'azimuth_offset': 0.0,
             'pitch_offset': 0.0,
@@ -735,11 +951,12 @@ class RadarOpticalCalibrator:
             'sample_count': 0,
             'use_position': False,
         }
-        self.far_params.update({'timestamp': 0, 'sample_count': 0, 'mean_error_deg': 0.0})
-        self.near_params.update({'timestamp': 0, 'sample_count': 0, 'mean_error_deg': 0.0})
-        self.save_calibration()
-        self.save_position_offset()
-        self.save_6dof_params()
+        self.far_params = _empty_6dof_params('far_6dof')
+        self.near_params = _empty_6dof_params('near_6dof')
+        self.segmented_6dof_params = []
+        self._delete_calibration_file('calibration_params.json')
+        self._delete_calibration_file('position_offset.json')
+        self._delete_calibration_file('6dof_params.json')
         print("[校准] 已清除所有校准参数")
 
 

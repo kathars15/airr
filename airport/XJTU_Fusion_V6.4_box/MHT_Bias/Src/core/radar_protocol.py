@@ -88,8 +88,8 @@ def parse_radar_point_packet(data):
             'north_speed': struct.unpack('<i', data[offset+40:offset+44])[0] / 100.0 if ins_info_size >= 44 else 0,
             'up_speed': struct.unpack('<i', data[offset+44:offset+48])[0] / 100.0 if ins_info_size >= 48 else 0,
             'ground_speed': struct.unpack('<i', data[offset+48:offset+52])[0] / 100.0 if ins_info_size >= 52 else 0,
-            'frame_cnt': struct.unpack('<i', data[offset+60:offset+64])[0] if ins_info_size >= 64 else 0,
-            'frame_time': struct.unpack('<i', data[offset+64:offset+68])[0] if ins_info_size >= 68 else 0,
+            'frame_cnt': struct.unpack('<i', data[offset+52:offset+56])[0] if ins_info_size >= 56 else 0,
+            'frame_time': struct.unpack('<i', data[offset+56:offset+60])[0] if ins_info_size >= 60 else 0,
         }
         ins_info['gps_altitude'] = (ins_info.get('gps_alt_sat', 0) >> 16) & 0xFFFF
         ins_info['satellite_num'] = ins_info.get('gps_alt_sat', 0) & 0xFFFF
@@ -122,7 +122,10 @@ def parse_radar_point_packet(data):
             if pitch > 32767:
                 pitch = pitch - 65536
             pitch_deg = pitch / 10.0
-            azimuth_deg = azimuth / 10.0
+            azimuth_relative = azimuth / 10.0
+            radar_heading = ins_info.get('radar_heading', 0)
+            azimuth_deg = (azimuth_relative + radar_heading) % 360.0
+            pitch_enu_deg = -pitch_deg
             
             # 速度/类型信息
             doppler_type_speed = struct.unpack('<I', data[offset+24:offset+28])[0]
@@ -142,7 +145,9 @@ def parse_radar_point_packet(data):
                 'target_id': target_id,
                 'range': range_val,
                 'azimuth': azimuth_deg,
+                'azimuth_relative': azimuth_relative,
                 'pitch': pitch_deg,
+                'pitch_enu': pitch_enu_deg,
                 'speed': speed_ms,
                 'speed_dir': speed_dir,
                 'doppler': doppler,

@@ -15,8 +15,9 @@ import numpy as np
 
 from core import optical_service
 from core.app_config import (
-    FAKE_DIS, HOST_IP, MAX_RANGE, MHT_BIAS_PATH, PROJECT_ROOT, TRACK_LOG_FILE,
-    TRACK_RESULTS_FILE, RAW_TRACKS_FILE,
+    DEBUG_POINT_MHT, FAKE_DIS, HOST_IP, MAX_RANGE, MHT_BIAS_PATH,
+    POINT_TRACK_LOG_FILE, POINT_TRACK_RESULTS_FILE, POINT_VS_RAW_COMPARE_FILE,
+    PROJECT_ROOT, RAW_TRACKS_FILE, TRACK_LOG_FILE, TRACK_RESULTS_FILE,
 )
 from core.calibration import calibrator
 from core.console_utils import safe_print
@@ -25,6 +26,8 @@ from core.optical_service import init_optical_tracker, send_to_optical
 from core.radar_receiver import receive_radar_data
 from core.radar_protocol import send_control_packet
 from core.track_log import get_all_tracks_from_log, get_track_by_id_from_log
+from tools.compare_point_tracks_vs_raw import print_summary as print_point_debug_summary
+from tools.compare_point_tracks_vs_raw import run_compare as run_point_debug_compare
 
 sys.path.append(PROJECT_ROOT)
 sys.path.append(MHT_BIAS_PATH)
@@ -104,20 +107,43 @@ def match_raw_track_id(polar_coords, infos, max_score=120.0):
     return best_info.get('track_id'), best_info.get('absolute_id'), best_score
 
 
-def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue):
-    """MHT跟踪并UDP发送结果，同时保存JSON"""
-    safe_print("[MHT进程] ========== MHT进程启动 ==========")
-    safe_print("[MHT进程] 等待接收雷达数据...")
+def normalize_mht_timestamp(value):
+    """Normalize radar timestamps without corrupting Unix wall-clock seconds."""
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return 0.0
+        value = value.astype(float).ravel()[0]
+    value = float(value)
+    if value > 1_000_000_000:
+        return value
+    if value > 100_000:
+        return value / 1000.0
+    return value
+
+
+def mht_process_and_send(
+    Data2Process_Buffer,
+    latest_tracks,
+    calibration_queue,
+    result_json_file=TRACK_RESULTS_FILE,
+    log_file_path=TRACK_LOG_FILE,
+    process_label="MHT进程",
+    update_shared_tracks=True,
+    emit_udp=True,
+):
+    """MHT跟踪处理，同时按模式保存结果。"""
+    safe_print(f"[{process_label}] ========== {process_label}启动 ==========")
+    safe_print(f"[{process_label}] 等待接收雷达数据...")
 
     from core.calibration import calibrator
-    safe_print("[MHT进程] 正在加载 MHT/聚类/分类依赖...")
+    safe_print(f"[{process_label}] 正在加载 MHT/聚类/分类依赖...")
     from MHT.POMHT import POMHT_Bias
     from common.clusters import Clustering_Obs
     from common.utlis import enu_to_geodetic
     from Sensor_Config.sensor_config import Sensor_Config, Name2SignalType, lla_original
     from Classify.TrackingClassify import TrackingClassify
     from Classify.Initial_Params import Initial_Classify_Params
-    safe_print("[MHT进程] MHT/聚类/分类依赖加载完成")
+    safe_print(f"[{process_label}] MHT/聚类/分类依赖加载完成")
 
     # 本地校准状态
     calibration_mode = False
@@ -128,10 +154,9 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
     # 创建发送socket
     ui_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     # 日志文件（文本格式）
-    log_file = open(TRACK_LOG_FILE, 'w', encoding='utf-8')
+    log_file = open(log_file_path, 'w', encoding='utf-8')
     
     # JSON结果文件（每帧追加）
-    result_json_file = TRACK_RESULTS_FILE
     # 如果是第一次运行，创建文件并写入数组开头
     import os
     if not os.path.exists(result_json_file):
@@ -153,7 +178,7 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
     
     def signal_handler(signum, frame):
         nonlocal exit_flag
-        safe_print("\n[MHT进程] 收到中断信号，准备退出...")
+        safe_print(f"\n[{process_label}] 收到中断信号，准备退出...")
         exit_flag = True
         try:
             Data2Process_Buffer.put_nowait(None)
@@ -205,16 +230,16 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
                 # 也设置 calibrator 的状态（用于其他功能）
                 calibrator.calibration_mode = True
                 calibrator.current_target_id = cmd['target_id']
-                safe_print(f"[MHT] 校准已开启，目标: {calibration_target}")
+                safe_print(f"[{process_label}] 校准已开启，目标: {calibration_target}")
             elif cmd['type'] == 'stop':
                 calibration_mode = False
                 # 调用校准器计算
                 calibrator.stop_calibration()
-                safe_print(f"[MHT] 校准已停止")
+                safe_print(f"[{process_label}] 校准已停止")
         except queue.Empty:
             pass
         except Exception as e:
-            safe_print(f"[MHT] 校准命令错误: {e}")
+            safe_print(f"[{process_label}] 校准命令错误: {e}")
             
         try:
             data_k = Data2Process_Buffer.get(timeout=0.5)
@@ -224,7 +249,7 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
             continue
         
         if data_k is None or exit_flag:
-            safe_print("[MHT进程] 收到结束信号，退出")
+            safe_print(f"[{process_label}] 收到结束信号，退出")
             break
         
         frame_count += 1
@@ -240,11 +265,7 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
         elif infos_chosen is None:
             infos_chosen = []
         
-        # 时间戳转换（毫秒转秒）
-        if isinstance(tmp_chosen, np.ndarray):
-            timestamp_sec = tmp_chosen[0] / 1000.0 if tmp_chosen[0] > 100000 else tmp_chosen[0]
-        else:
-            timestamp_sec = tmp_chosen / 1000.0 if tmp_chosen > 100000 else tmp_chosen
+        timestamp_sec = normalize_mht_timestamp(tmp_chosen)
         
         # 量测聚类
         obs_k = []
@@ -327,7 +348,7 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
         
         # MHT跟踪
         if not Initial:
-            safe_print("[MHT] 初始化跟踪器...")
+            safe_print(f"[{process_label}] 初始化跟踪器...")
             Initial = True
             TOMHT = POMHT_Bias(
                 Lambda_NT=MHT_Params['Lambda_NT'],
@@ -347,7 +368,7 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
             )
         else:
             if timestamp_last > timestamp_sec:
-                safe_print(f"[MHT] 时间戳乱序，跳过")
+                safe_print(f"[{process_label}] 时间戳乱序，跳过")
                 continue
             timestamp_last = timestamp_sec
             TOMHT.forward(timestamp=timestamp_sec, obs_k=obs_k, 
@@ -385,14 +406,15 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
                     track_id_str = f'Radar-{label_id_map[node.label]}'
                     track_update_seq[track_id_str] = track_update_seq.get(track_id_str, 0) + 1
 
-                    latest_tracks[track_id_str] = {
-                        'valid': True,
-                        'track_id': track_id_str,
-                        'pos_enu': pos_enu.reshape(-1).tolist(),
-                        'vel_enu': vel_enu.reshape(-1).tolist(),
-                        'last_update_time': time.time(),
-                        'update_seq': track_update_seq[track_id_str],
-                    }
+                    if update_shared_tracks and latest_tracks is not None:
+                        latest_tracks[track_id_str] = {
+                            'valid': True,
+                            'track_id': track_id_str,
+                            'pos_enu': pos_enu.reshape(-1).tolist(),
+                            'vel_enu': vel_enu.reshape(-1).tolist(),
+                            'last_update_time': time.time(),
+                            'update_seq': track_update_seq[track_id_str],
+                        }
 
                     # =========================
                     # 2秒匀速预测
@@ -611,7 +633,7 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
                 }
                 
                 try:
-                    with open(TRACK_RESULTS_FILE, 'a', encoding='utf-8') as f:
+                    with open(result_json_file, 'a', encoding='utf-8') as f:
                         json.dump(json_frame_data, f, ensure_ascii=False, indent=2)
                         f.write(',\n')
                     # safe_print(f"[JSON] 已保存第{frame_count}帧结果到 {TRACK_RESULTS_FILE}")
@@ -619,12 +641,12 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
                     safe_print(f"[JSON] 保存失败: {e}")
                 
                 # UDP发送结果
-                try:
-                    json_string = json.dumps(msg_result)
-                    sock.sendto(json_string.encode(), (HOST_IP, 9999))
-                    # safe_print(f"[发送] 已发送 {target_num} 个目标")
-                except Exception as e:
-                    safe_print(f"[发送] UDP发送失败: {e}")
+                if emit_udp:
+                    try:
+                        json_string = json.dumps(msg_result)
+                        sock.sendto(json_string.encode(), (HOST_IP, 9999))
+                    except Exception as e:
+                        safe_print(f"[{process_label}] UDP发送失败: {e}")
                 
                 # 写入文本日志文件
                 log_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | 第{frame_count}帧 | {target_num}个目标\n")
@@ -653,24 +675,25 @@ def mht_process_and_send(Data2Process_Buffer, latest_tracks , calibration_queue)
         
         if frame_count % 10 == 0:
             active_tracks = len(TOMHT.Output_Nodes[-1]) if len(TOMHT.Output_Nodes) > 0 else 0
-            # safe_print(f"\n[统计] 已处理 {frame_count} 帧, 当前航迹数: {active_tracks}")
+            if process_label != "MHT进程":
+                safe_print(f"[{process_label}] 已处理{frame_count}帧, 当前航迹数={active_tracks}")
     
     # 关闭JSON文件
     try:
-        with open('track_results.json', 'r+', encoding='utf-8') as f:
+        with open(result_json_file, 'r+', encoding='utf-8') as f:
             content = f.read()
             if content.endswith(',\n'):
                 content = content[:-2] + '\n'
             f.seek(0)
             f.write(content + ']')
             f.truncate()
-        safe_print("[JSON] 文件已关闭")
+        safe_print(f"[{process_label}] JSON文件已关闭")
     except:
         pass
     
     log_file.close()
     sock.close()
-    safe_print("[MHT进程] 退出")
+    safe_print(f"[{process_label}] 退出")
 
 
 def control_console():
@@ -860,7 +883,6 @@ def optical_data_monitor():
                         calibrator.add_optical_measurement(
                             current_az, current_pitch, now, current_status, current_range
                         )
-
             time.sleep(0.2)
 
         except Exception as e:
@@ -983,7 +1005,7 @@ def auto_follow_loop():
             pred_pos_enu = motion['pos_enu'] + motion['vel_enu'] * dt
             pred_polar = enu_to_radar_polar(pred_pos_enu, radar_heading_deg=None)
 
-            send_distance = pred_polar['range'] - FAKE_DIS
+            send_distance = pred_polar['range']
             if send_distance < 0:
                 send_distance = 0.0
 
@@ -1321,7 +1343,14 @@ def _stop_process(process, name, timeout=5):
         process.join(timeout=2)
 
 
-def shutdown_processes(process_receive, process_mht, data_queue, clear_data=False):
+def shutdown_processes(
+    process_receive,
+    process_mht,
+    data_queue,
+    point_debug_process=None,
+    point_debug_queue=None,
+    clear_data=False,
+):
     safe_print("[退出] 正在关闭光电连接...")
     optical_service.close_tracker()
 
@@ -1334,6 +1363,29 @@ def shutdown_processes(process_receive, process_mht, data_queue, clear_data=Fals
     except Exception:
         pass
     _stop_process(process_mht, "MHT进程", timeout=8)
+
+    if point_debug_process is not None:
+        safe_print("[退出] 正在停止点迹调试MHT进程...")
+        try:
+            if point_debug_queue is not None:
+                point_debug_queue.put(None)
+        except Exception:
+            pass
+        _stop_process(point_debug_process, "点迹调试MHT进程", timeout=8)
+
+    if DEBUG_POINT_MHT:
+        try:
+            summary, _matches = run_point_debug_compare(
+                RAW_TRACKS_FILE,
+                POINT_TRACK_RESULTS_FILE,
+                POINT_VS_RAW_COMPARE_FILE,
+                time_window=0.5,
+            )
+            safe_print("[点迹调试] 自动对比完成")
+            print_point_debug_summary(summary)
+            safe_print(f"[点迹调试] 对比明细已保存: {POINT_VS_RAW_COMPARE_FILE}")
+        except Exception as exc:
+            safe_print(f"[点迹调试] 自动对比失败: {exc}")
 
     if clear_data:
         deleted, failed = clear_data_dir()
@@ -1378,20 +1430,39 @@ if __name__ == "__main__":
 
     
     calibration_queue = multiprocessing.Queue()
+    point_debug_queue = multiprocessing.Queue() if DEBUG_POINT_MHT else None
 
     # 启动数据处理进程
     Data2Process_Buffer = multiprocessing.Queue()
     
     process_receive = multiprocessing.Process(target=receive_radar_data, 
-                                              args=(Data2Process_Buffer,))
+                                              args=(Data2Process_Buffer, point_debug_queue))
     process_mht = multiprocessing.Process(
         target=mht_process_and_send,
         args=(Data2Process_Buffer, latest_tracks,calibration_queue)
-    )   
+    )
+    point_debug_process = None
+    if DEBUG_POINT_MHT:
+        point_debug_process = multiprocessing.Process(
+            target=mht_process_and_send,
+            args=(
+                point_debug_queue,
+                None,
+                multiprocessing.Queue(),
+                POINT_TRACK_RESULTS_FILE,
+                POINT_TRACK_LOG_FILE,
+                "点迹调试MHT进程",
+                False,
+                False,
+            ),
+        )
     
     print("[BOOT] starting radar receiver and MHT processes", flush=True)
     process_receive.start()
     process_mht.start()
+    if point_debug_process is not None:
+        safe_print("[点迹调试] DEBUG_POINT_MHT=ON，启动点迹调试链路")
+        point_debug_process.start()
     print("[BOOT] initializing optical tracker", flush=True)
     init_optical_tracker()
     print("[BOOT] optical initialization step finished", flush=True)
@@ -1448,6 +1519,8 @@ if __name__ == "__main__":
             process_receive,
             process_mht,
             Data2Process_Buffer,
+            point_debug_process=point_debug_process,
+            point_debug_queue=point_debug_queue,
             clear_data=clear_data_on_exit,
         )
 

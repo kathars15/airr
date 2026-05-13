@@ -2,8 +2,14 @@ import pandas as pd
 import numpy as np
 
 # 读取保存的点迹数据
-df = pd.read_csv('radar_calibration_data.csv', 
-                  names=['timestamp', 'azimuth', 'pitch', 'range', 'target_id', 'speed'])
+df = pd.read_csv(
+    'point_records.csv',
+    names=[
+        'timestamp', 'target_id', 'range', 'azimuth', 'pitch',
+        'speed', 'doppler', 'target_type', 'is_true_point',
+        'radar_heading', 'frame_cnt',
+    ],
+)
 
 # 假设参考物在方位45°、距离120米附近
 # 先筛选出参考物的数据

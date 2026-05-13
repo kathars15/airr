@@ -12,11 +12,17 @@ MHT_BIAS_PATH = os.path.join(PROJECT_ROOT, 'MHT_Bias')
 DATA_DIR = os.path.join(SCRIPT_DIR, 'data')
 os.makedirs(DATA_DIR, exist_ok=True)
 
+DEBUG_POINT_MHT = True
+
 RAW_TRACKS_FILE = os.path.join(DATA_DIR, 'raw_tracks.csv')
+CALIBRATION_FILE = os.path.join(DATA_DIR, 'radar_calibration_data.csv')
 OPTICAL_MEASUREMENTS_FILE = os.path.join(DATA_DIR, 'optical_measurements.csv')
 TRACK_RESULTS_FILE = os.path.join(DATA_DIR, 'track_results.json')
 TRACK_LOG_FILE = os.path.join(DATA_DIR, 'track_log.txt')
-CALIBRATION_FILE = os.path.join(DATA_DIR, 'radar_calibration_data.csv')
+POINT_RECORDS_FILE = os.path.join(DATA_DIR, 'point_records.csv')
+POINT_TRACK_RESULTS_FILE = os.path.join(DATA_DIR, 'point_track_results.json')
+POINT_TRACK_LOG_FILE = os.path.join(DATA_DIR, 'point_track_log.txt')
+POINT_VS_RAW_COMPARE_FILE = os.path.join(DATA_DIR, 'point_vs_raw_track_compare.csv')
 
 RADAR_IP = "192.168.0.99"
 HOST_IP = "127.0.0.1"  # 推荐，监听所有本机地址
