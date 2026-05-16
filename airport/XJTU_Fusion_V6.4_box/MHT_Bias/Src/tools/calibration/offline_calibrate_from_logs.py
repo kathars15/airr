@@ -6,8 +6,8 @@ Inputs:
   - data/optical_measurements.csv: optical angle packets saved while tracking
 
 Example:
-  python .\tools\offline_calibrate_from_logs.py --target 5
-  python .\tools\offline_calibrate_from_logs.py --target Radar-12 --window 0.5 --save
+  python .\tools\calibration\offline_calibrate_from_logs.py --target 5
+  python .\tools\calibration\offline_calibrate_from_logs.py --target Radar-12 --window 0.5 --save
 """
 
 import argparse
@@ -23,7 +23,7 @@ from datetime import datetime
 
 import numpy as np
 
-SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 

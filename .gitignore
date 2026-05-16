@@ -27,3 +27,20 @@ Thumbs.db
 *.log
 *.tmp
 *.temp
+
+# Codex local artifacts
+.agents/
+skills-lock.json
+chat_export_calibration.txt
+docu/radar_protocol_extract.txt
+
+# Generated plots and exports
+pic/
+calibration_data/*
+!calibration_data/README.md
+
+# Runtime calibration and flight data
+airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/calibration_data/*
+!airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/calibration_data/README.md
+airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/flight_data_runs/*
+!airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/flight_data_runs/README.md

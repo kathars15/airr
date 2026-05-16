@@ -17,7 +17,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
-SRC_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = Path(__file__).resolve().parents[2]
 TRACK_LOG = SRC_DIR / "data" / "track_log.txt"
 CALIB_PARAMS = SRC_DIR / "calibration_data" / "calibration_params.json"
 POSITION_OFFSET = SRC_DIR / "calibration_data" / "position_offset.json"

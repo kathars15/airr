@@ -1,8 +1,0 @@
-app_config.py              配置：IP、端口、AI模板、校准时间窗
-calibration.py             雷达-光电校准算法
-calibration_commands.py    校准相关控制台命令封装
-console_utils.py           safe_print 等控制台工具
-opti.py                    当前 main2.py 使用的光电控制类
-radar_protocol.py          雷达协议解析/控制包构造
-radar_receiver.py          雷达 UDP 接收与解析
-time_utils.py              GPS/时间格式转换
