@@ -50,6 +50,71 @@ def load_session(path):
     return data
 
 
+def parse_range_arg(text):
+    try:
+        left, right = text.split(":", 1)
+        return float(left), float(right)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(f"invalid range '{text}', expected min:max") from exc
+
+
+def filter_source_measurements(source_measurements, drop_indexes, drop_ranges):
+    source = deepcopy(source_measurements)
+    samples = []
+    for item in source.get("samples", []):
+        index = int(item.get("index", -1))
+        if index in drop_indexes:
+            continue
+        radar = item.get("radar", {})
+        radar_range = float(radar.get("range", 0) or 0)
+        skip = False
+        for range_min, range_max in drop_ranges:
+            if range_min <= radar_range <= range_max:
+                skip = True
+                break
+        if skip:
+            continue
+        samples.append(item)
+    source["samples"] = samples
+    source["sample_count"] = len(samples)
+    return source
+
+
+def rebuild_stability_samples_from_source(source_measurements):
+    rebuilt = []
+    for item in source_measurements.get("samples", []):
+        radar = item.get("radar", {})
+        try:
+            rebuilt.append({
+                "timestamp": float(radar.get("timestamp", 0) or 0),
+                "track_id": radar.get("track_id"),
+                "range": float(radar.get("raw_range", radar.get("range", 0)) or 0),
+                "azimuth": float(radar.get("raw_azimuth", radar.get("azimuth", 0)) or 0),
+                "pitch": float(radar.get("raw_pitch", radar.get("pitch", 0)) or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+    return rebuilt
+
+
+def filter_stability_samples(stability_samples, drop_ranges):
+    if stability_samples is None:
+        return None
+    if not stability_samples:
+        return []
+    result = []
+    for item in stability_samples:
+        radar_range = float(item.get("range", 0) or 0)
+        skip = False
+        for range_min, range_max in drop_ranges:
+            if range_min <= radar_range <= range_max:
+                skip = True
+                break
+        if not skip:
+            result.append(item)
+    return result
+
+
 def normalize_for_compare(value):
     if isinstance(value, dict):
         result = {}
@@ -105,6 +170,8 @@ def main():
     parser.add_argument("--input", help="Path to one saved session JSON file")
     parser.add_argument("--list", action="store_true", help="List available session files and exit")
     parser.add_argument("--dry-run", action="store_true", help="Recompute but do not overwrite standard output files")
+    parser.add_argument("--drop-index", type=int, action="append", default=[], help="Drop one paired sample by index")
+    parser.add_argument("--drop-range", type=parse_range_arg, action="append", default=[], help="Drop paired samples within one radar range interval min:max")
     args = parser.parse_args()
 
     session_files = list_session_files()
@@ -126,8 +193,18 @@ def main():
         session_path = session_files[0]
 
     session = load_session(session_path)
-    source_measurements = session.get("source_measurements", {})
-    stability_samples = session.get("radar_stability_samples", [])
+    source_measurements = filter_source_measurements(
+        session.get("source_measurements", {}),
+        set(args.drop_index),
+        list(args.drop_range),
+    )
+    if args.drop_index or args.drop_range:
+        stability_samples = rebuild_stability_samples_from_source(source_measurements)
+    else:
+        stability_samples = filter_stability_samples(
+            session.get("radar_stability_samples", []),
+            list(args.drop_range),
+        )
     target_history = session.get("target_history", [])
 
     sample_count = int(source_measurements.get("sample_count", 0))
@@ -135,6 +212,10 @@ def main():
     print(f"[replay] target: {session.get('target_id')}")
     print(f"[replay] sample_count: {sample_count}")
     print(f"[replay] mode: {'dry-run' if args.dry_run else 'overwrite standard outputs'}")
+    if args.drop_index:
+        print(f"[replay] dropped indexes: {sorted(set(args.drop_index))}")
+    if args.drop_range:
+        print(f"[replay] dropped ranges: {args.drop_range}")
 
     calibrator.load_source_measurements(
         source_measurements,

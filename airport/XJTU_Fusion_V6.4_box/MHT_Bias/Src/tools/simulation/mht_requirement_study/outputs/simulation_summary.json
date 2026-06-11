@@ -1,0 +1,130 @@
+{
+  "created_at": "2026-06-10 16:34:41",
+  "settings": {
+    "scan_period_sec": 2.0,
+    "sim_duration_sec": 380.0,
+    "warmup_sec": 10.0,
+    "monte_carlo_runs": 10,
+    "random_seed": 20260610,
+    "target_count": 2,
+    "sensor_count_range": [
+      3,
+      3
+    ],
+    "sensor_count_steps": 1,
+    "sensor_pd_range": [
+      0.7,
+      0.7
+    ],
+    "sensor_pd_steps": 1,
+    "sensor_pos_std_range_m": [
+      24,
+      24
+    ],
+    "sensor_pos_std_steps": 1,
+    "sensor_fa_prob_range": [
+      0.4,
+      0.4
+    ],
+    "sensor_fa_prob_steps": 1,
+    "sensor_count_values": [
+      3
+    ],
+    "sensor_pd_values": [
+      0.7
+    ],
+    "sensor_pos_std_values_m": [
+      24.0
+    ],
+    "sensor_fa_prob_values": [
+      0.4
+    ],
+    "default_sensor_pos_std_m": 30.0,
+    "required_detection_rate": 0.9,
+    "required_rmse_m": 15.0,
+    "required_false_alarm_rate": 0.05,
+    "match_gate_rule": "MATCH_GATE_M = 0.90 * sigma_3d_rmse",
+    "match_gate_root_scale": 1.6,
+    "target_models": [
+      "multirotor_uav: 3-18 m/s，可悬停，轻微机动",
+      "fixed_wing_small: 18-45 m/s，转弯和高度变化较平滑",
+      "bird_slow: 2-15 m/s，航向和速度扰动更强"
+    ],
+    "input_false_alarm_model": "single-sensor event false-alarm ratio FA/All; false alarms appear only when truth detections exist",
+    "position_error_model": "3D distance RMSE converted to isotropic XYZ Gaussian noise"
+  },
+  "rows": [
+    {
+      "sensor_count": 3,
+      "sensor_pd": 0.7,
+      "sensor_pos_std_m": 24.0,
+      "sensor_fa_prob": 0.4,
+      "monte_carlo_runs": 10,
+      "detection_rate": 0.9578378378378378,
+      "false_alarm_rate": 0.012193340055280718,
+      "rmse_m": 14.853096701825738,
+      "rmse_z_m": 8.103829079380118,
+      "mean_error_m": 13.542839398915476,
+      "p95_error_m": 24.346137264913118,
+      "matched_samples": 3544,
+      "truth_samples": 3700,
+      "output_tracks": 3588,
+      "false_tracks": 44,
+      "pass_requirement": true,
+      "trial_detection_rate_mean": 0.9578378378378378,
+      "trial_false_alarm_rate_mean": 0.012193340055280718,
+      "trial_rmse_m_mean": 14.853096701825738,
+      "trial_rmse_z_m_mean": 8.103829079380118,
+      "aggregate_detection_rate": 0.9578378378378378,
+      "aggregate_false_alarm_rate": 0.012263099219620958
+    }
+  ],
+  "boundary_rows": [
+    {
+      "sensor_fa_prob": 0.4,
+      "min_sensor_count": 3,
+      "min_sensor_pd_in_pass_set": 0.7,
+      "sensor_pos_std_m": 24.0,
+      "detection_rate": 0.9578378378378378,
+      "rmse_m": 14.853096701825738,
+      "false_alarm_rate": 0.012193340055280718
+    },
+    {
+      "sensor_fa_prob": "overall",
+      "min_sensor_count": 3,
+      "min_sensor_pd_in_pass_set": 0.7,
+      "sensor_pos_std_m": 24.0,
+      "detection_rate": 0.9578378378378378,
+      "rmse_m": 14.853096701825738,
+      "false_alarm_rate": 0.012193340055280718
+    }
+  ],
+  "stability_summary": {
+    "total_cases": 1,
+    "pass_cases": 1,
+    "pass_ratio": 1.0,
+    "sensor_count_range": [
+      3,
+      3
+    ],
+    "sensor_pd_range": [
+      0.7,
+      0.7
+    ],
+    "sensor_pos_std_range_m": [
+      24.0,
+      24.0
+    ],
+    "sensor_fa_prob_range": [
+      0.4,
+      0.4
+    ]
+  },
+  "failure_summary": {
+    "fail_detection_only": 0,
+    "fail_rmse_only": 0,
+    "fail_false_alarm_only": 0,
+    "fail_multiple_conditions": 0,
+    "pass": 1
+  }
+}

@@ -2,6 +2,12 @@ import numpy as np
 from scipy.optimize import least_squares
 from typing import List, Dict, Tuple
 
+from core.app_config import (
+    CALIBRATION_MAX_OFFSET_X_M,
+    CALIBRATION_MAX_OFFSET_Y_M,
+    CALIBRATION_MAX_OFFSET_Z_M,
+)
+
 
 def angle_diff_deg(target_angle: float, source_angle: float) -> float:
     """计算 target - source 的最短有符号角度差。"""
@@ -35,22 +41,43 @@ def summarize_angle_offsets(measurements: List[Dict]) -> Dict:
         'pitch_offset_std': float(np.std(pitch_diffs)),
     }
 
+def polar_to_vector(az: float, pitch: float, rng: float = 1.0) -> np.ndarray:
+    """极坐标转笛卡尔坐标 (北东天坐标系: y=北, x=东, z=天)"""
+    az_rad = np.radians(az)
+    pitch_rad = np.radians(pitch)
+    cos_pitch = np.cos(pitch_rad)
+    return np.array([
+        rng * cos_pitch * np.sin(az_rad),  # x: 东
+        rng * cos_pitch * np.cos(az_rad),  # y: 北
+        rng * np.sin(pitch_rad)            # z: 天
+    ])
+
+
+def calculate_geometry_condition(measurements: List[Dict]) -> float:
+    """Estimate conditioning of bearing-only translation fit."""
+    if not measurements:
+        return float("inf")
+
+    eye = np.eye(3)
+    a_blocks = []
+    for m in measurements:
+        u = polar_to_vector(m['optical_az'], m['optical_pitch'], 1.0)
+        u = u / max(np.linalg.norm(u), 1e-9)
+        a_blocks.append(eye - np.outer(u, u))
+
+    A = np.vstack(a_blocks)
+    ata = A.T @ A
+    singular_values = np.linalg.svd(ata, compute_uv=False)
+    if singular_values[-1] <= 1e-12:
+        return float("inf")
+    return float(singular_values[0] / singular_values[-1])
+
+
 def calculate_offset_from_measurements(measurements: List[Dict]) -> Tuple[np.ndarray, bool]:
     """
     根据雷达-光学配对测量值计算光学传感器相对于雷达的位置偏移
     """
-    
-    def polar_to_vector(az: float, pitch: float, rng: float = 1.0) -> np.ndarray:
-        """极坐标转笛卡尔坐标 (北东天坐标系: y=北, x=东, z=天)"""
-        az_rad = np.radians(az)
-        pitch_rad = np.radians(pitch)
-        cos_pitch = np.cos(pitch_rad)
-        return np.array([
-            rng * cos_pitch * np.sin(az_rad),  # x: 东
-            rng * cos_pitch * np.cos(az_rad),  # y: 北
-            rng * np.sin(pitch_rad)            # z: 天
-        ])
-    
+
     def residuals(params, meas):
         """残差函数"""
         dx, dy, dz = params[:3]
@@ -78,10 +105,17 @@ def calculate_offset_from_measurements(measurements: List[Dict]) -> Tuple[np.nda
     # 参数初始化
     n_measurements = len(measurements)
     x0 = [0.0, 0.0, 0.0] + [m['radar_range'] * 0.8 for m in measurements]
-    
-    # 设置参数边界 - 限制偏移量在合理范围（-3000m 到 3000m）
-    bounds_lower = [-3000.0, -3000.0, -3000.0] + [1.0] * n_measurements
-    bounds_upper = [3000.0, 3000.0, 3000.0] + [np.inf] * n_measurements
+
+    bounds_lower = [
+        -CALIBRATION_MAX_OFFSET_X_M,
+        -CALIBRATION_MAX_OFFSET_Y_M,
+        -CALIBRATION_MAX_OFFSET_Z_M,
+    ] + [1.0] * n_measurements
+    bounds_upper = [
+        CALIBRATION_MAX_OFFSET_X_M,
+        CALIBRATION_MAX_OFFSET_Y_M,
+        CALIBRATION_MAX_OFFSET_Z_M,
+    ] + [np.inf] * n_measurements
     
     try:
         result = least_squares(
@@ -190,6 +224,7 @@ def calculate_calibration_from_measurements(measurements: List[Dict], min_sample
             'reason': '位置偏移优化失败',
             'sample_count': len(measurements),
             'angle_stats': angle_stats,
+            'geometry_condition': calculate_geometry_condition(measurements),
         }
 
     validation = validate_offset(offset, measurements)
@@ -199,7 +234,8 @@ def calculate_calibration_from_measurements(measurements: List[Dict], min_sample
         'sample_count': len(measurements),
         'validation': validation,
         'angle_stats': angle_stats,
-        'method': 'cal_offset_least_squares',
+        'geometry_condition': calculate_geometry_condition(measurements),
+        'method': 'position_bias_bearing_task',
     }
 
 

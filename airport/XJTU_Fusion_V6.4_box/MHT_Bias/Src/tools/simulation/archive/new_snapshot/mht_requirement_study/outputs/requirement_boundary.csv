@@ -1,0 +1,3 @@
+﻿sensor_fa_prob,min_sensor_count,min_sensor_pd_in_pass_set,sensor_pos_std_m,detection_rate,rmse_m,false_alarm_rate
+0.2,4,0.7,15.0,0.9683673469387755,14.749928019740343,0.039230574538091624
+overall,4,0.7,15.0,0.9683673469387755,14.749928019740343,0.039230574538091624

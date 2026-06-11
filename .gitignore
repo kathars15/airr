@@ -18,6 +18,7 @@ ENV/
 .idea/
 *.swp
 *.swo
+.vscode/
 
 # OS files
 .DS_Store
@@ -33,6 +34,9 @@ Thumbs.db
 skills-lock.json
 chat_export_calibration.txt
 docu/radar_protocol_extract.txt
+tmp_scientific_agent_skills/
+tmp_torch_wheels/
+logs/
 
 # Generated plots and exports
 pic/
@@ -44,3 +48,8 @@ airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/calibration_data/*
 !airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/calibration_data/README.md
 airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/flight_data_runs/*
 !airport/XJTU_Fusion_V6.4_box/MHT_Bias/Src/flight_data_runs/README.md
+airport/XJTU_Fusion_V6.4_box/MHT_Bias/CV/code_image/runs/
+airport/XJTU_Fusion_V6.4_box/MHT_Bias/CV/code_image/__pycache__/
+airport/XJTU_Fusion_V6.4_box/MHT_Bias/CV/code_image/ultralytics/__pycache__/
+airport/XJTU_Fusion_V6.4_box/MHT_Bias/CV/code_image/0418_01.mp4
+airport/XJTU_Fusion_V6.4_box/MHT_Bias/CV/code_image/0419.mp4
